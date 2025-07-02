@@ -748,11 +748,7 @@ function OptimizedSuperRebirth.Initialize()
     createSuperRebirthSystem(Window)
 end
 
--- Auto-initialize
-OptimizedSuperRebirth.Initialize()
 
-return OptimizedSuperRebirth
-end
 
 -- Auto-initialize
 OptimizedSuperRebirth.Initialize()
