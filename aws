@@ -407,7 +407,7 @@ local function createSuperRebirthSystem(window)
     -- Player info paragraph
     local playerInfoParagraph = tab:Paragraph("PlayerInfo", {
         Title = "Player Info",
-        Content = "Calculating Info...",
+        Content = "Please enable the super rebirth toggle to start.",
         TitleAlignment = "Middle",
         ContentAlignment = Enum.TextXAlignment.Left
     })
@@ -426,6 +426,25 @@ local function createSuperRebirthSystem(window)
         Values = {},
         Multi = false
     })
+
+    local refreshTeamsButton = tab:AddButton({
+        Title = "Refresh Teams",
+        Description = "Manually update team dropdown lists",
+        Callback = function()
+            -- Clear cache to force fresh data
+            DataCache.teams = {data = {}, lastUpdate = 0}
+
+            -- Refresh team data and update dropdowns
+            local teamData, uniqueNames = fetchTeamDataOptimized()
+            if uniqueNames and strengthTeamDropdown and winsTeamDropdown then
+                strengthTeamDropdown:SetValues(uniqueNames)
+                winsTeamDropdown:SetValues(uniqueNames)
+            else
+                warn("Failed to refresh teams: Missing data or dropdown references")
+            end
+        end
+    })
+
     
     -- Auto rebirth toggle
     local autoRebirthToggle = tab:AddToggle("AutoRebirth", {
