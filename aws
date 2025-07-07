@@ -271,16 +271,47 @@ local function fetchTeamDataOptimized()
     return cache.data.teamData or {}, cache.data.uniqueNames or {}
 end
 
+local PERF_CONFIG = {
+    CACHE_DURATION = 15, -- Cache data for 15 seconds
+    UPDATE_INTERVAL = 5, -- Main loop every 5 seconds
+    BATCH_SIZE = 5, -- Smaller batches
+    UI_UPDATE_INTERVAL = 10, -- Update UI every 10 seconds
+    ARM_CHECK_INTERVAL = 60, -- Check arms every 60 seconds (1 minute)
+    TEAM_REFRESH_INTERVAL = 120, -- Refresh teams every 2 minutes
+    CLICK_THREADS = 5, -- Reduced from 20 to 5
+    TOOL_CLICK_INTERVAL = 1 -- Tool click every 1 second
+}
+
+-- Data Cache System with persistent arm storage
+local DataCache = {
+    teams = {data = {}, lastUpdate = 0},
+    arms = {
+        data = {
+            bestFightingPercent = 100, -- Default 100%
+            bestTrainingMultiplier = 1, -- Default 1x
+            bestFightingArmId = nil,
+            bestTrainingArmId = nil
+        }, 
+        lastUpdate = 0
+    },
+    requirements = {data = {}, lastUpdate = 0}
+}
+
+
 local function fetchArmStatsOptimized()
     local cache = DataCache.arms
     local now = tick()
     
+    -- Only check arms every minute to prevent breaking
     if (now - cache.lastUpdate) < PERF_CONFIG.ARM_CHECK_INTERVAL then
-        return cache.data or {}
+        return cache.data -- Return stored data
     end
     
+    
     local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
-    if not playerGui then return cache.data or {} end
+    if not playerGui then 
+        return cache.data -- Return stored data instead of defaults
+    end
     
     local armsFolder = playerGui:FindFirstChild("GameUI")
     if armsFolder then
@@ -296,13 +327,18 @@ local function fetchArmStatsOptimized()
         end
     end
     
-    if not armsFolder then return cache.data or {} end
+    if not armsFolder then 
+        return cache.data -- Return stored data instead of defaults
+    end
     
-    local bestFightingPercent = 0
-    local bestTrainingMultiplier = 0
-    local bestFightingArmId = nil
-    local bestTrainingArmId = nil
+    -- Use current cached values as starting point
+    local bestFightingPercent = cache.data.bestFightingPercent or 100
+    local bestTrainingMultiplier = cache.data.bestTrainingMultiplier or 1
+    local bestFightingArmId = cache.data.bestFightingArmId
+    local bestTrainingArmId = cache.data.bestTrainingArmId
     
+    
+    -- Check for better arms
     for _, arm in pairs(armsFolder:GetChildren()) do
         if arm:IsA("GuiObject") and arm.Name ~= "Squiggle" then
             local toggle = arm:FindFirstChild("Toggle")
@@ -311,7 +347,7 @@ local function fetchArmStatsOptimized()
                 if stat and stat:IsA("GuiObject") then
                     local text = stat.Text
                     
-                    -- Check fighting percentage
+                    -- Check fighting percentage (only update if better)
                     local percentStr = text:match("(%d+)%%")
                     if percentStr then
                         local percentValue = tonumber(percentStr)
@@ -321,7 +357,7 @@ local function fetchArmStatsOptimized()
                         end
                     end
                     
-                    -- Check training multiplier
+                    -- Check training multiplier (only update if better)
                     local xStr = text:match("([%d%.]+)x")
                     if xStr then
                         local xValue = tonumber(xStr)
@@ -335,6 +371,7 @@ local function fetchArmStatsOptimized()
         end
     end
     
+    -- Update cache with new data (or keep old if no better arms found)
     cache.data = {
         bestFightingPercent = bestFightingPercent,
         bestTrainingMultiplier = bestTrainingMultiplier,
@@ -399,7 +436,8 @@ local function createSuperRebirthSystem(window)
         trainingStartTime = 0,
         wasTrainingLastLoop = false,
         currentBestZone = 1,
-        lastEquipmentCheck = 0
+        lastEquipmentCheck = 0,
+        lastTeleportedZone = 1,
     }
     
     local tab = window:AddTab({Title = "Super Rebirths", Icon = "star"})
@@ -487,13 +525,21 @@ local function createSuperRebirthSystem(window)
         end
     end
     
-    -- Fight functions
     local function fightBoss(zone, bossName)
         if superRBData.isFighting then return end
-        superRBData.isFighting = true
         
+        -- Check if player is in the correct zone before fighting
+        local currentZone = LocalPlayer:GetAttribute("CurrentZone") or 1
+        if currentZone ~= zone then
+            teleportToZone(zone)
+            task.wait(2) -- Wait for teleport to complete
+        end
+        
+        superRBData.isFighting = true
+        superRBData.lastFightTime = tick() -- Track when fight started
+
         local args = {
-            workspace.GameObjects.ArmWrestling:FindFirstChild(tostring(zone)).NPC[bossName]
+            bossName
         }
         
         pcall(function()
@@ -576,7 +622,6 @@ local function createSuperRebirthSystem(window)
                 end
             end)
             
-            -- Main super rebirth loop (slower)
             spawn(function()
                 while superRBData.running do
                     local teamData = fetchTeamDataOptimized()
@@ -587,31 +632,52 @@ local function createSuperRebirthSystem(window)
                         continue
                     end
                     
-                    -- Get player stats
+            spawn(function()
+                local restartTimer = tick()
+                while superRBToggle.Value do
+                    if (tick() - restartTimer) >= 60 then -- Check every loop if 60 seconds passed
+                        superRBToggle:SetValue(false)
+                        task.wait(2)
+                        superRBToggle:SetValue(true)
+                        task.wait(1)
+                        superRBToggle:SetValue(true) -- Second attempt
+                        restartTimer = tick() -- Reset timer
+                    end
+                    task.wait(1) -- Check every second instead of blocking for 60
+                end
+            end)
+
                     local handStrength = LocalPlayer:GetAttribute("HandStrength") or 0
                     local knuckleStrength = LocalPlayer:GetAttribute("KnuckleStrength") or 0
                     local bicepPower = LocalPlayer:GetAttribute("BicepPower") or 0
                     local totalStrength = handStrength + knuckleStrength + bicepPower
                     local currentWins = LocalPlayer:GetAttribute("Wins") or 0
+                    local currentrail = LocalPlayer:GetAttribute("Trail") or 0
                     local rebirths = LocalPlayer:GetAttribute("Rebirths") or 0
                     local superrb = LocalPlayer:GetAttribute("SuperRBTokens") or 0
-                    
-                    -- Determine zone based on wins (like New SR.lua)
+
                     local bestZone = GetZoneFromWins(currentWins)
                     
-                    -- Teleport to the zone based on wins
-                    teleportToZone(bestZone)
+                    -- Only teleport if zone increased
+                    if bestZone > superRBData.lastTeleportedZone then
+                        teleportToZone(bestZone)
+                        superRBData.lastTeleportedZone = bestZone
+                    end
                     
                     local boss = getBossForZone(bestZone)
-                    local multiplier = 1 + ((armStats.bestFightingPercent or 0) / 100)
-                    local canBeatBoss = (totalStrength * multiplier) >= boss.Strength
+                    local multiplier = (armStats.bestFightingPercent or 0) / 100
+                    local effectiveStrength = totalStrength * multiplier
+                    local canBeatBoss = effectiveStrength >= boss.Strength 
                     
                     local nextSRLevel, nextRebirthReq = getNextSRRequirements(superrb)
                     
                     -- Check if we can perform super rebirth
                     if nextSRLevel and nextRebirthReq and rebirths >= nextRebirthReq then
                         performSuperRebirth()
-                        wait(10) -- Longer wait after super rebirth
+                        -- Reset zone to 1 after super rebirth
+                        superRBData.lastTeleportedZone = 1
+                        teleportToZone(1)
+                        wait(3) -- Longer wait after super rebirth
                         superRBData.wasTrainingLastLoop = false
                         superRBData.trainingStartTime = 0
                     -- Check if we can afford super rebirth by doing rebirths
@@ -630,18 +696,20 @@ local function createSuperRebirthSystem(window)
                         end
                         superRBData.wasTrainingLastLoop = false
                         superRBData.trainingStartTime = 0
+                    -- If we can beat the boss, fight for wins
                     elseif canBeatBoss then
-                        -- Fight for wins
+                        -- Equip wins team and fighting arm for boss battles
                         equipTeam(superRBData.winsTeam, teamData)
+                        equipArm(armStats.bestFightingArmId)
                         
                         if tick() - superRBData.lastArmEquipTime > 10 then
                             equipArm(armStats.bestFightingArmId)
                             superRBData.lastArmEquipTime = tick()
                         end
                         
-                        if not superRBData.isFighting and tick() - superRBData.lastFightTime > 10 then
+                        -- Start boss fight if not already fighting
+                        if not superRBData.isFighting then
                             fightBoss(bestZone, boss.GameName)
-                            superRBData.lastFightTime = tick()
                         end
                         
                         superRBData.wasTrainingLastLoop = false
@@ -649,6 +717,7 @@ local function createSuperRebirthSystem(window)
                     else
                         -- Train for strength
                         equipTeam(superRBData.strengthTeam, teamData)
+                        equipArm(armStats.bestTrainingArmId)
                         
                         if tick() - superRBData.lastArmEquipTime > 10 then
                             equipArm(armStats.bestTrainingArmId)
@@ -665,14 +734,14 @@ local function createSuperRebirthSystem(window)
                             for i = 1, 30 do -- Fewer rebirths
                                 performRebirth()
                                 task.wait(0.2)
-                                if i % 10 == 0 then -- Trail every 10 rebirths
+                                if i % 30 == 0 then -- Trail every 30 rebirths
                                     trail()
                                 end
                             end
                             superRBData.trainingStartTime = tick()
                         end
                     end
-                    
+                   
                     wait(PERF_CONFIG.UPDATE_INTERVAL)
                 end
             end)
@@ -683,7 +752,7 @@ local function createSuperRebirthSystem(window)
                     if superRBData.isFighting then
                         startAutoClick()
                     end
-                    wait(3) -- Slower check
+                    wait(1) -- Slower check
                 end
             end)
             
@@ -751,10 +820,18 @@ local function createSuperRebirthSystem(window)
         end
     end)
     
-    -- Listen for boss kill changes
+    -- Listen for zone changes
+    LocalPlayer:GetAttributeChangedSignal("CurrentZone"):Connect(function()
+        -- Clear fighting status if zone changes during a fight
+        if superRBData.isFighting then
+            superRBData.isFighting = false
+        end
+    end)
+
+    -- Listen for boss kill changes with shorter cooldown
     LocalPlayer:GetAttributeChangedSignal("BossKills"):Connect(function()
         superRBData.isFighting = false
-        task.wait(3)
+        task.wait(0.5) -- Reduced from 1 second to 0.5 seconds
     end)
     
     -- Initial setup
